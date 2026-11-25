@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>公众号工作台 · 鹈鹕镇村民</title>
+<link rel="stylesheet" href="/style.css">
+<script defer src="/app.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <a class="brand" href="#today"><span class="seal">鹈</span><span><strong>鹈鹕镇村民</strong><small>公众号工作台</small></span></a>
+    <nav aria-label="工作台">
+      <a data-nav="today" href="#today"><span class="nav-icon" aria-hidden="true">◈</span>今日工作台</a>
+      <a data-nav="topics" href="#topics"><span class="nav-icon" aria-hidden="true">⌗</span>选题池</a>
+      <a data-nav="articles" href="#articles"><span class="nav-icon" aria-hidden="true">▤</span>文章库</a>
+      <a data-nav="publish" href="#publish"><span class="nav-icon" aria-hidden="true">↗</span>发表台</a>
+    </nav>
+    <div class="side-bottom">
+      <a href="https://mp.weixin.qq.com/" target="_blank" rel="noopener">微信公众号后台 ↗</a>
+      <span><i></i> 本机工作区</span>
+    </div>
+  </aside>
+  <main id="main"><p class="loading">正在加载工作台…</p></main>
+</div>
+<dialog id="dialog"><form id="dialog-form"><div id="dialog-inner"></div><div class="dialog-actions"><button type="button" id="cancel">取消</button><button type="submit" class="primary" id="submit">保存</button></div></form></dialog>
+<p id="notice" role="status" aria-live="polite"></p>
+</body>
+</html>

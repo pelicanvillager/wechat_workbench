@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>公众号直接粘贴版</title>
+<style>
+body{margin:0;background:#f3f3ea;color:#252c23;font:16px/1.7 -apple-system,BlinkMacSystemFont,sans-serif}
+header,article{max-width:680px;margin:22px auto;padding:25px;background:#fff;border:1px solid #dce1d5;border-radius:14px}
+button{margin:3px;padding:8px 12px;background:#f5f7ef;border:1px solid #ccd8c8;border-radius:6px;cursor:pointer}
+h1{line-height:1.35} small{color:#51624e}#manual{width:100%;min-height:6rem}
+@media(max-width:740px){header,article{margin:12px;padding:17px}}
+</style>
+<header>
+  <strong>公众号直接粘贴版</strong>
+  <p>复制正文后在微信后台单独上传封面和本地图，替换正文内的插图提示。正文预览位于下方。</p>
+  <small id="cover"></small>
+  <div id="actions"></div>
+  <p id="feedback" role="status"></p>
+  <details><summary>手动选择并复制</summary><textarea id="manual" readonly></textarea><button id="select">选择下方排版正文</button></details>
+</header>
+<article><h1 id="title"></h1><div id="preview"></div><div id="copy" hidden></div></article>
+<script type="application/json" id="data">__ARTICLE_DATA__</script>
+<script>
+const data = JSON.parse(document.getElementById('data').textContent);
+const get = id => document.getElementById(id);
+get('title').textContent = data.title;
+get('cover').textContent = data.cover ? '封面文件 ' + data.cover : '封面待添加';
+get('preview').innerHTML = data.preview;
+get('copy').innerHTML = data.copy;
+const selectBody = () => {
+  const range = document.createRange();
+  range.selectNodeContents(get('preview'));
+  getSelection().removeAllRanges();
+  getSelection().addRange(range);
+};
+get('select').onclick = selectBody;
+for (const [label, key] of [['复制排版正文','copy'],['复制标题','title'],['复制作者','author'],['复制摘要','summary'],['复制标签','tags']]) {
+  const button = document.createElement('button');
+  button.textContent = label;
+  button.onclick = async () => {
+    const value = data[key];
+    if (!value) { get('feedback').textContent = label.slice(2) + '为空'; return; }
+    const plain = key === 'copy' ? get('copy').innerText || get('copy').textContent : value;
+    get('manual').value = plain;
+    try {
+      if (key === 'copy') {
+        await navigator.clipboard.write([new ClipboardItem({'text/html':new Blob([value], {type:'text/html'}), 'text/plain':new Blob([plain],{type:'text/plain'})})]);
+      } else { await navigator.clipboard.writeText(value); }
+      get('feedback').textContent = '已' + label;
+    } catch {
+      if (key === 'copy') { selectBody(); }
+      else {get('manual').closest('details').open = true; get('manual').select();}
+      get('feedback').textContent = '已选择内容，按 Command+C 复制';
+    }
+  };
+  get('actions').append(button);
+}
+</script>
+</html>

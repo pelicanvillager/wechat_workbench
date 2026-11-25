@@ -1,0 +1,10 @@
+/data/
+工作台数据.json
+01_选题/
+02_文章/
+wechat.json
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.DS_Store
