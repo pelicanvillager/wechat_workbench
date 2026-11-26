@@ -183,21 +183,38 @@ function topicRow(item, catalog) {
     (item.url ? '<p class="small">' + link((item.source || '来源') + ' ↗', item.url) + '</p>' : '') +
     '</div><div class="actions">' + pill(item.status) +
     ((!catalog || item.status === '候选') ? '<button data-open-topic="' + escape(item.id) + '">' +
-      (item.status === '已开稿' ? '查看稿件' : '开稿') + '</button>' : '') + '</div></li>';
+      (item.status === '已开稿' ? '查看稿件' : '开稿') + '</button>' : '') +
+    '<button class="text-button topic-delete" data-delete-topic="' + escape(item.id) + '" aria-label="' +
+    escape('删除选题：' + item.title) + '">删除</button></div></li>';
 }
 function topicsPage() {
   main.innerHTML = head('选题池', '整理读者问题、真实素材和热点线索。', newTopic) +
     '<div class="stack"><section class="panel"><h2>工作台选题</h2>' +
     (state.topics.length ? '<ul class="plain-list">' + state.topics.map(item => topicRow(item, false)).join('') + '</ul>'
       : '<p class="empty">从热点中收藏，或录入自己的观察。</p>') +
-    '</section><section class="panel"><h2>已有选题表</h2><ul class="plain-list">' +
-    state.catalog.map(item => topicRow(item, true)).join('') + '</ul></section></div>';
+    '</section><section class="panel"><h2>已有选题表</h2>' +
+    (state.catalog.length ? '<ul class="plain-list">' + state.catalog.map(item => topicRow(item, true)).join('') + '</ul>'
+      : '<p class="empty">没有可显示的选题。</p>') + '</section></div>';
   document.querySelectorAll('[data-open-topic]').forEach(button => {
     button.onclick = () => busy(button, '正在打开…', async () => {
       const item = await request('/api/open', {id: button.dataset.openTopic});
       await reload();
       location.hash = articleLink(item.id);
     });
+  });
+  main.querySelectorAll('[data-delete-topic]').forEach(button => {
+    button.onclick = () => {
+      const id = button.dataset.deleteTopic;
+      const item = [...state.topics, ...state.catalog].find(topic => topic.id === id);
+      modal('<h2>删除选题</h2><p>' + escape(item.title) + '</p>' +
+        '<p class="sub">删除后，这条选题会从选题池移除。已开稿的文章仍可在文章库查看。</p>',
+        '删除选题', async () => {
+          await request('/api/topic/delete', {id});
+          await reload();
+          if (activeRoute === 'topics') render();
+          notice('已删除选题');
+        });
+    };
   });
 }
 function libraryRow(item) {

@@ -195,6 +195,11 @@ def catalog_topics():
     return rows
 
 
+def visible_topics(state, topics):
+    deleted = set(state.get('deleted_topics', ()))
+    return [topic for topic in topics if topic['id'] not in deleted]
+
+
 def split_article(raw):
     if raw.startswith('---\n'):
         match = re.match(r'\A(---\n[\s\S]*?\n---)[ \t]*(?:\n|$)', raw)
@@ -304,7 +309,7 @@ def create_topic(payload):
         raise Problem('来源请填写有效的网页链接。')
     with LOCK:
         state = read_state()
-        for topic in state['topics']:
+        for topic in visible_topics(state, state['topics']):
             if topic['title'] == fields['title']:
                 return topic
         topic = dict(fields, id=secrets.token_hex(6), status='候选', date=today())
@@ -313,11 +318,27 @@ def create_topic(payload):
     return topic
 
 
+def delete_topic(payload):
+    identifier = payload.get('id')
+    if not isinstance(identifier, str) or not identifier:
+        raise Problem('请选择要删除的选题。')
+    with LOCK:
+        state = read_state()
+        deleted = state.setdefault('deleted_topics', [])
+        if identifier not in deleted:
+            if not any(topic['id'] == identifier for topic in state['topics'] + catalog_topics()):
+                raise Problem('选题已不存在。')
+            deleted.append(identifier)
+            save_state(state)
+    return {'id': identifier}
+
+
 def open_article(payload):
     identifier = str(payload.get('id', ''))
     with LOCK:
         state = read_state()
-        topic = next((t for t in state['topics'] + catalog_topics() if t['id'] == identifier), None)
+        topics = visible_topics(state, state['topics'] + catalog_topics())
+        topic = next((topic for topic in topics if topic['id'] == identifier), None)
         if not topic:
             raise Problem('选题已不存在。')
         linked = next((key for key, value in state['articles'].items() if value.get('topic') == identifier), None)
@@ -840,11 +861,13 @@ def dashboard():
             account = None
         return {'date': today(), 'csrf': TOKEN, 'hot': state['hot'], 'articles': articles,
                 'wechat_appid': account[0] if account else '',
-                'topics': state['topics'], 'catalog': catalog_topics(), 'categories': list(CATEGORIES)}
+                'topics': visible_topics(state, state['topics']),
+                'catalog': visible_topics(state, catalog_topics()), 'categories': list(CATEGORIES)}
 
 
 POST_ACTIONS = {
-    '/api/topic': create_topic, '/api/open': open_article, '/api/save': save_article,
+    '/api/topic': create_topic, '/api/topic/delete': delete_topic,
+    '/api/open': open_article, '/api/save': save_article,
     '/api/status': change_status, '/api/draft': draft, '/api/draft/reset': clear_draft,
     '/api/export': export_article, '/api/image': add_image, '/api/ai': ai_draft,
     '/api/wechat/check': check_wechat,
