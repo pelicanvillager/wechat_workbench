@@ -1,4 +1,6 @@
 """Create draft articles through the WeChat Official Accounts API."""
+from http.client import HTTPException
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -22,14 +24,40 @@ ERROR_HINTS = {
 
 
 class WeChatError(Exception):
-    def __init__(self, message, rejected=False):
+    def __init__(self, message, rejected=False, *, public_ip=''):
         super().__init__(message)
         self.rejected = rejected
+        self.public_ip = public_ip
 
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def normalize_public_ip(value):
+    if '%' in value:
+        return ''
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return ''
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return str(address) if address.is_global and not address.is_multicast else ''
+
+
+def detect_public_ip():
+    opener = build_opener(NoRedirect())
+    for url in ('https://api64.ipify.org/', 'https://api.ipify.org/'):
+        try:
+            with opener.open(url, timeout=4) as response:
+                public_ip = normalize_public_ip(response.read(128).decode('ascii'))
+        except (OSError, ValueError, HTTPException):
+            continue
+        if public_ip:
+            return public_ip
+    return ''
 
 
 CONFIG = Path.home() / '.config' / 'wechat-workbench' / 'wechat.json'
@@ -82,7 +110,12 @@ def request(endpoint, *, token='', params=None, payload=None, media=None):
     if code not in (None, 0):
         if isinstance(code, int):
             hint = ERROR_HINTS.get(code, '请在公众号后台核对接口权限和稿件素材')
-            raise WeChatError(f'微信接口返回 {code}，{hint}。', rejected=True)
+            public_ip = ''
+            if code == 40164 and isinstance(result.get('errmsg'), str):
+                match = re.search(r'\binvalid ip\s+([0-9a-fA-F:.]+)(?=\s|,|$)', result['errmsg'], re.IGNORECASE)
+                if match:
+                    public_ip = normalize_public_ip(match[1])
+            raise WeChatError(f'微信接口返回 {code}，{hint}。', rejected=True, public_ip=public_ip)
         raise WeChatError('微信接口返回格式异常。')
     return result
 

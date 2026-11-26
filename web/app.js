@@ -245,7 +245,9 @@ function publishPage() {
   const done = state.articles.filter(item => item.published);
   main.innerHTML = head('发表台', '审稿、核对微信草稿和登记正式文章链接。', link('打开微信后台 ↗', wechat, 'button primary')) +
     '<div class="stack"><section class="panel"><div class="panel-head"><h2>微信草稿接口</h2><button id="check-draft">检查微信连接</button></div>' +
-    '<p id="doctor" class="sub"></p></section><section class="panel"><h2>待审核与微信草稿</h2>' +
+    '<p id="doctor" class="sub" role="status"></p><div id="public-ip-row" hidden>' +
+    '<span id="public-ip" class="sub"></span> <button id="copy-public-ip">复制 IP</button></div>' +
+    '</section><section class="panel"><h2>待审核与微信草稿</h2>' +
     (queue.length ? '<ul class="plain-list">' + queue.map(libraryRow).join('') + '</ul>' : '<p class="empty">在文章页标记待审核后，稿件会出现在这里。</p>') +
     '</section><section class="panel"><h2>发表记录</h2>' +
     (done.length ? '<ul class="plain-list">' + done.map(item =>
@@ -255,13 +257,25 @@ function publishPage() {
     '</section></div>';
   const showDoctor = () => {
     if (!get('doctor')) return;
-    get('doctor').textContent = doctor ?
-      '微信鉴权和草稿箱读取权限已通过。具体稿件仍需检查。' :
-      '使用本地排版直连微信。录入公众号 AppSecret 后，可检查草稿箱权限。';
+    get('doctor').textContent = doctor
+      ? (doctor.draft ? '微信鉴权和草稿箱读取权限已通过。' : doctor.error)
+      : '检查公网出口 IP 和微信草稿箱权限。';
+    const ip = doctor?.public_ip;
+    get('public-ip-row').hidden = !doctor;
+    get('copy-public-ip').hidden = !ip;
+    get('public-ip').textContent = ip
+      ? (doctor.ip_source === 'wechat' ? '微信识别的公网出口 IP：' : '公网出口 IP（ipify 测得，微信出口可能不同）：') + ip
+      : '当前未能检测到公网出口 IP。';
   };
   get('check-draft').onclick = () => busy(get('check-draft'), '检查中…', async () => {
+    doctor = undefined;
+    showDoctor();
     doctor = await request('/api/wechat/check', {});
     showDoctor();
+  });
+  get('copy-public-ip').onclick = () => busy(get('copy-public-ip'), '复制中…', async () => {
+    await navigator.clipboard.writeText(doctor.public_ip);
+    notice('已复制公网出口 IP');
   });
   showDoctor();
 }

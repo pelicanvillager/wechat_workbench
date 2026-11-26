@@ -440,8 +440,16 @@ def check_wechat(_payload):
     try:
         wechat_api.check_access(*wechat_credentials())
     except wechat_api.WeChatError as error:
-        raise Problem(str(error)) from None
-    return {'draft': True}
+        if error.public_ip:
+            return {'draft': False, 'error': str(error), 'public_ip': error.public_ip, 'ip_source': 'wechat'}
+        failure = str(error)
+    except Problem as error:
+        failure = str(error)
+    else:
+        failure = ''
+    public_ip = wechat_api.detect_public_ip()
+    return {'draft': not failure, 'error': failure, 'public_ip': public_ip,
+            'ip_source': 'ipify' if public_ip else ''}
 
 
 def draft(payload):
@@ -531,6 +539,8 @@ def draft(payload):
         if submitting and not (isinstance(error, wechat_api.WeChatError) and error.rejected):
             raise Problem('草稿提交结果待核对，请先检查微信后台。') from None
         remember()
+        if isinstance(error, wechat_api.WeChatError) and error.public_ip:
+            raise Problem(f'{error} 微信识别到的公网出口 IP：{error.public_ip}') from None
         raise Problem(str(error) if isinstance(error, wechat_api.WeChatError) else '本机图片处理失败。') from None
     else:
         return remember(status='已创建草稿', media_id=media_id)
