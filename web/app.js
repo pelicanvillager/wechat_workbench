@@ -251,6 +251,7 @@ function publishPage() {
 function editorPage(item) {
   const path = encodeURIComponent(item.id);
   const hasBody = Boolean(item.body);
+  const bodyImages = item.images.filter(image => image.url !== item.cover);
   const choices = [['title', '标题'], ['author', '作者'], ['summary', '摘要'], ['tags', '标签']];
   main.innerHTML = '<p class="date"><a href="#articles">← 文章库</a>　' + escape(item.date) + '</p>' +
     '<header class="page-head"><div><h1 class="editor-title">' + escape(item.title) + '</h1><div class="sub">' +
@@ -274,14 +275,29 @@ function editorPage(item) {
       choices.map(([key, name]) => '<button data-copy="' + key + '">复制' + name + '</button>').join('') + '</div>' : '') +
     '<details><summary>手动选择复制</summary><p class="small">可直接选择上方正文，或从下方字段复制文字。</p>' +
     '<textarea readonly aria-label="手动复制文字">' + escape([item.title, item.author, item.summary, item.tags].join('\n')) + '</textarea></details></section>' +
-    '<section class="panel"><h2>封面与正文图</h2>' +
-    (item.cover ? '<img class="latest-media" src="' + escape(item.cover) + '" alt="当前封面">' : '<p class="empty">封面待添加。</p>') +
+    '<section class="panel"><div class="panel-head"><h2>封面与正文图</h2>' +
+    (item.cover ? '<a class="text-button" href="' + escape(item.cover) + '" target="_blank" rel="noopener">查看原图 ↗</a>' : '') + '</div>' +
+    '<div class="cover-previews">' +
+    '<div class="cover-card"><p class="small">宽幅卡片</p>' +
+    (item.cover ? '<img class="cover-wide" src="' + escape(item.cover) + '" alt="宽幅裁切预览">' : '<div class="cover-wide cover-placeholder">封面待添加</div>') +
+    '<p class="cover-title" data-card-title></p><p class="cover-summary small" id="card-summary"></p></div>' +
+    '<div class="cover-card cover-chat"><p class="small">聊天卡片</p><div class="cover-chat-row">' +
+    '<p class="cover-title" data-card-title></p>' +
+    (item.cover ? '<img class="cover-square" src="' + escape(item.cover) + '" alt="方形裁切预览">' : '') +
+    '</div></div></div>' +
+    '<p class="small hot-info">裁切示意，正式效果以微信后台手机预览为准。</p>' +
     '<div class="actions"><button data-image="cover">' + (item.cover ? '更换封面' : '添加封面') + '</button><button data-image="body">添加正文图</button></div>' +
     '<input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>' +
-    (item.images.length ? '<div class="image-list">' + item.images.map(image => '<button data-insert="' + escape(image.name) + '" title="插入正文">' +
+    (bodyImages.length ? '<div class="image-list">' + bodyImages.map(image => '<button data-insert="' + escape(image.name) + '" title="插入正文">' +
       '<img src="' + escape(image.url) + '" alt="">' + escape(image.name.split('/').pop()) + '</button>').join('') + '</div>' : '') +
     '<p class="small hot-info">点击图片插入 Markdown，补写图注后保存。</p></section>' +
-    '<section class="panel"><h2>审稿与发表</h2><div class="actions" style="margin-top:12px">' +
+    '<section class="panel"><h2>审稿与发表</h2>' +
+    '<details><summary>编辑检查</summary><ul class="editor-review">' +
+    '<li>开头尽早交代具体场景和读者要解决的问题。</li>' +
+    '<li>标题提到的判断或做法在正文中有材料、有解释。</li>' +
+    '<li>至少有一段值得保存或转给别人，可以是一句判断、一个例子或一个动作。</li>' +
+    '<li>核对事实、引文和图源，检查手机首屏与封面裁切。</li>' +
+    '</ul></details><div class="actions" style="margin-top:12px">' +
     (item.status !== '已发表' ? '<button id="queue">' + (item.status === '待审核' ? '退回写作' : '标记待审核') + '</button>' : '') +
     '<button id="export">生成直接粘贴版</button>' + (item.has_export ? '<a class="button" href="/export?id=' + path + '">下载已保存版</a>' : '') +
     '</div><div class="actions" style="margin-top:10px">' +
@@ -299,7 +315,17 @@ function editorPage(item) {
     dirty = true;
     get('edit-state').textContent = '有未保存的修改';
   };
+  const cardTitles = main.querySelectorAll('[data-card-title]');
+  const cardSummary = get('card-summary');
+  const updateCard = () => {
+    const caption = get('title').value.trim() || '标题待填写';
+    cardTitles.forEach(element => { element.textContent = caption; });
+    cardSummary.textContent = get('summary').value.trim();
+    cardSummary.hidden = !cardSummary.textContent;
+  };
   fields.forEach(field => { get(field).oninput = markDirty; });
+  ['title', 'summary'].forEach(field => { get(field).addEventListener('input', updateCard); });
+  updateCard();
   const requireSaved = () => { if (dirty) throw new Error('请先保存稿件。'); };
   async function refreshEditor() {
     const viewing = activeRoute === 'article' && currentArticle?.id === item.id;
