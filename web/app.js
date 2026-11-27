@@ -317,6 +317,9 @@ function editorPage(item) {
     (item.cover ? '<img class="cover-square" src="' + escape(item.cover) + '" alt="方形裁切预览">' : '') +
     '</div></div></div>' +
     '<p class="small hot-info">裁切示意，正式效果以微信后台手机预览为准。</p>' +
+    (item.status !== '已发表' && hasBody ? '<div class="actions"><button id="auto-illustrate" class="primary">自动配图并插入</button></div>' +
+      '<p class="small">Codex 阅读正文，选位置、配图、写图注并更新直接粘贴版。通常需要几分钟。</p>' : '') +
+    (item.status !== '已发表' ? '<div class="actions"><button class="primary" data-generate="cover">生成封面</button><button data-generate="body">生成正文图</button></div>' : '') +
     '<div class="actions"><button data-image="cover">' + (item.cover ? '更换封面' : '添加封面') + '</button><button data-image="body">添加正文图</button></div>' +
     '<input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>' +
     (bodyImages.length ? '<div class="image-list">' + bodyImages.map(image => '<button data-insert="' + escape(image.name) + '" title="插入正文">' +
@@ -367,9 +370,12 @@ function editorPage(item) {
       editorPage(currentArticle);
     }
   }
-  get('save').onclick = () => busy(get('save'), '保存中…', async () => {
+  function saveEditor() {
     const raw = Object.fromEntries(fields.map(field => [field, get(field).value]));
-    await request('/api/save', {id: item.id, rev: item.rev, ...raw});
+    return request('/api/save', {id: item.id, rev: item.rev, ...raw});
+  }
+  get('save').onclick = () => busy(get('save'), '保存中…', async () => {
+    await saveEditor();
     await refreshEditor();
     notice('已保存稿件');
   });
@@ -437,6 +443,41 @@ function editorPage(item) {
     markDirty();
   };
   document.querySelectorAll('[data-insert]').forEach(button => { button.onclick = () => insert(button.dataset.insert); });
+  const autoIllustrate = get('auto-illustrate');
+  if (autoIllustrate) autoIllustrate.onclick = () => busy(autoIllustrate, '正在配图并插入…', async () => {
+    const locked = fields.map(get);
+    locked.forEach(input => { input.readOnly = true; });
+    let result;
+    let savedDraft = false;
+    try {
+      const saved = dirty ? await saveEditor() : item;
+      savedDraft = saved !== item;
+      result = await request('/api/image/auto', {id: item.id, rev: saved.rev});
+    } finally {
+      locked.forEach(input => { input.readOnly = false; });
+      if (get('auto-illustrate') === autoIllustrate && (result || savedDraft)) await refreshEditor();
+      else if (result && !dirty) await refreshEditor();
+    }
+    notice(result.count ? '已插入 ' + result.count + ' 张正文图及图注，直接粘贴版已更新' : '正文已有足量配图，直接粘贴版已更新');
+  });
+  main.querySelectorAll('[data-generate]').forEach(button => {
+    button.onclick = () => {
+      if (dirty) return notice('请先保存稿件。');
+      const kind = button.dataset.generate;
+      const isCover = kind === 'cover';
+      const replacesCover = isCover && Boolean(item.cover);
+      modal('<h2>' + button.textContent + '</h2>' +
+        '<label>画面说明<textarea name="scene" rows="3" maxlength="600" placeholder="可留空。也可以写明要画的场景、构图或正文段落。"></textarea></label>' +
+        (replacesCover ? '<p class="small">新图将设为当前封面，原图保留在文章目录。</p>' : '') +
+        '<p class="small">Codex 使用标题、摘要和画面说明生成一张插画，保存到本文图片目录。通常需要几分钟。</p>',
+        replacesCover ? '生成并更换封面' : '开始生成', async form => {
+          requireSaved();
+          await request('/api/image/generate', {id: item.id, rev: item.rev, kind, scene: form.scene, replace: replacesCover});
+          await refreshEditor();
+          notice(isCover ? '已生成并设置封面' : '正文图已保存。将光标放到正文对应位置，再点击图片插入。');
+        });
+    };
+  });
   document.querySelectorAll('[data-image]').forEach(button => {
     button.onclick = () => {
       if (dirty) return notice('请先保存稿件。');

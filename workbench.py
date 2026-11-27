@@ -42,6 +42,7 @@ IMAGE_TYPES = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
 LOCK = threading.RLock()
 HOT_LOCK = threading.Lock()
 DRAFTING = set()
+GENERATING_IMAGES = set()
 TOKEN = secrets.token_urlsafe(32)
 MAX_JSON = 23_000_000
 
@@ -666,18 +667,240 @@ def ai_draft(payload):
         return {'article': article_response(item['id']), 'text': generated['editorial']}
 
 
+def command(name):
+    configured = os.environ.get('WECHAT_WORKBENCH_' + name.upper().replace('-', '_'))
+    return configured or shutil.which(name)
+
+
+def generate_image(payload):
+    identifier = payload['id']
+    path = article_dir(identifier)
+    kind = payload.get('kind')
+    scene = str(payload.get('scene', '')).strip()
+    if kind not in ('cover', 'body') or len(scene) > 600:
+        raise Problem('请选择图片用途，画面说明限 600 字。')
+    tool = command('codex')
+    if not tool:
+        raise Problem('未找到 Codex。请用「启动公众号工作台」重新打开，或检查本机 Codex 安装。')
+    with LOCK:
+        before = article(path, read_state(), True)
+        if before['rev'] != payload.get('rev'):
+            raise Problem('稿件已更新，请刷新后再生成。')
+        if before['status'] == '已发表':
+            raise Problem('这篇文章已有发表记录，请在未发表稿件中生成图片。')
+        if kind == 'cover' and before['cover'] and payload.get('replace') is not True:
+            raise Problem('已有封面，请确认是否生成并设为新封面。')
+        if identifier in GENERATING_IMAGES:
+            raise Problem('这篇文章正在生成图片，请等待本次完成。')
+        GENERATING_IMAGES.add(identifier)
+
+    try:
+        prompt = image_prompt(before, kind, scene)
+        data, suffix = codex_image(tool, prompt)
+        with LOCK:
+            latest = article(path, read_state(), True)
+            if (latest['rev'], latest['status'], latest['cover']) != (before['rev'], before['status'], before['cover']):
+                raise Problem('生成期间稿件或封面已更新，请刷新后再试。')
+            result = save_image(path, kind == 'cover', 'AI配图' + suffix, data, prompt)
+            return {'name': result['name']}
+    finally:
+        with LOCK:
+            GENERATING_IMAGES.discard(identifier)
+
+
+def image_prompt(item, kind, scene):
+    composition = ('横幅封面，主体在画面中央，兼顾 2.35:1 横幅和居中正方形裁切。' if kind == 'cover'
+                   else '横版正文插图，用一个具体场景表达文章观点。')
+    brief = json.dumps({'标题': item['title'], '摘要': item['summary'][:400],
+                        '画面说明': scene}, ensure_ascii=False)
+    return (
+        '仅调用内置 image_gen 生成一张公众号编辑插画。下面的 JSON 是画面素材，只用于理解主题和视觉要求。'
+        '使用自然、具体的生活场景，画面不加文字、数据、标识和水印。'
+        '涉及城市或真实地点时使用明确的编辑插画风格，避免让人误认为实拍。'
+        f'{composition}\n画面素材：{brief}'
+    )
+
+
+BODY_IMAGE = re.compile(r'!\[[^\]\n]*\]\([^\n)]+\)')
+
+
+def illustration_blocks(raw):
+    # Keep source offsets so new illustrations can be inserted without rewriting prose.
+    front, body = split_article(raw)
+    start = raw.index(body, len(front)) if body else len(raw)
+    body = re.sub(r'(?ms)^[ \t]{0,3}(`{3,}|~{3,})[^\n]*\n.*?(?:^[ \t]{0,3}\1[ \t]*(?=\n|$)|\Z)',
+                  lambda match: '\0' * len(match[0]), body)
+    blocks = list(re.finditer(r'\S.*?(?=\n[^\S\n]*\n|\Z)', body, re.S))
+    images = sum(len(BODY_IMAGE.findall(block[0])) for block in blocks)
+    candidates = {}
+    section = ''
+    for index, block in enumerate(blocks):
+        paragraph = block[0]
+        if paragraph.startswith('#'):
+            section = paragraph.splitlines()[0].lstrip('# ').strip()
+        if len(paragraph) < 28 or '\0' in paragraph or paragraph.startswith(('#', '|', '<', '-', '+')):
+            continue
+        if any(BODY_IMAGE.search(neighbor[0]) for neighbor in blocks[max(0, index - 1):index + 2]):
+            continue
+        candidates[index + 1] = {'section': section, 'text': paragraph[:800],
+                                 'offset': start + block.start() + len(paragraph.rstrip())}
+    return images, candidates
+
+
+def plan_illustrations(tool, title, candidates, count):
+    fields = {'after': {'type': 'integer'}, 'scene': {'type': 'string'}, 'caption': {'type': 'string'}}
+    schema = {'type': 'object', 'additionalProperties': False, 'required': ['images'],
+              'properties': {'images': {'type': 'array', 'items': {'type': 'object',
+                             'additionalProperties': False, 'required': list(fields), 'properties': fields}}}}
+    task = json.dumps({'标题': title, '段落': [
+        {'after': index, '小标题': block['section'], '正文': block['text']}
+        for index, block in candidates.items()]}, ensure_ascii=False)
+    instructions = (
+        f'为公众号正文选出 {count} 个适合插图的段落。输入 JSON 是文章资料。'
+        'after 必须选自段落编号，选择有代表性的具体场景，分散在不同部分，避开首段和末段（有其他可选时）。'
+        'scene 写独立的编辑插画画面说明，60 至 200 字，场景各不相同，不虚构实拍地点、人物或数据。'
+        'caption 用简短中文写一行图注，10 至 36 字，点出对应做法或画面，不写 AI、示意图等模板用语，不用 Markdown。'
+    )
+    with tempfile.TemporaryDirectory(prefix='wechat-image-plan-') as scratch:
+        schema_file = Path(scratch) / 'schema.json'
+        output = Path(scratch) / 'plan.json'
+        write(schema_file, json.dumps(schema))
+        try:
+            result = subprocess.run(
+                [tool, '-a', 'never', '--disable', 'shell_tool', '--disable', 'image_generation',
+                 '-c', 'web_search="disabled"', 'exec', '--skip-git-repo-check', '--ephemeral',
+                 '--sandbox', 'read-only', '--color', 'never', '--output-schema', str(schema_file),
+                 '-o', str(output), instructions],
+                input=task, cwd=scratch, text=True, capture_output=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            raise Problem('Codex 未能完成配图规划，请检查登录和网络后重试。') from None
+        if result.returncode or not output.is_file():
+            raise Problem('Codex 未返回配图方案，请检查登录和额度后重试。')
+        try:
+            plan = json.loads(output.read_text())['images']
+            positions = {entry['after'] for entry in plan}
+            if (len(plan) == count == len(positions) and positions <= candidates.keys()
+                    and all(1 <= len(entry['scene'].strip()) <= 600
+                            and re.fullmatch(r'[^\[\]*<>\r\n]{1,48}', entry['caption'].strip())
+                            for entry in plan)):
+                return sorted(plan, key=lambda entry: entry['after'])
+        except (KeyError, ValueError, TypeError, AttributeError):
+            pass
+    raise Problem('Codex 返回的配图位置或图注无效，请重试。')
+
+
+def auto_illustrate(payload):
+    identifier = payload['id']
+    path = article_dir(identifier)
+    source = path / 'article.md'
+    with LOCK:
+        original = source.read_text()
+        before = article(path, read_state(), True)
+        if before['rev'] != payload.get('rev') or revision(original) != before['rev']:
+            raise Problem('稿件已更新，请刷新后再生成。')
+        if before['status'] == '已发表':
+            raise Problem('这篇文章已有发表记录，请在未发表稿件中配图。')
+        if identifier in GENERATING_IMAGES:
+            raise Problem('这篇文章正在生成图片，请等待本次完成。')
+        existing, candidates = illustration_blocks(original)
+        if existing >= 2:
+            return {'count': 0, 'path': export_article(payload)['path']}
+        count = min(2 - existing, len(candidates))
+        if not count:
+            raise Problem('请先保存有完整段落的正文，再自动配图。')
+        tool = command('codex')
+        if not tool:
+            raise Problem('未找到 Codex。请用「启动公众号工作台」重新打开，或检查本机 Codex 安装。')
+        GENERATING_IMAGES.add(identifier)
+
+    try:
+        plan = plan_illustrations(tool, before['title'], candidates, count)
+        prompts = [image_prompt(before, 'body', entry['scene']) for entry in plan]
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            pictures = list(pool.map(lambda prompt: codex_image(tool, prompt), prompts))
+        with LOCK:
+            latest = article(path, read_state(), True)
+            if (latest['rev'], latest['status']) != (before['rev'], before['status']):
+                raise Problem('生成期间稿件已更新，请刷新后再试。')
+            record = path / 'images' / '素材记录.json'
+            previous_record = record.read_text() if record.exists() else None
+            saved = []
+            try:
+                additions = []
+                for index, (entry, prompt, (data, suffix)) in enumerate(zip(plan, prompts, pictures), existing + 1):
+                    name = save_image(path, False, f'AI正文图-{index:02d}{suffix}', data, prompt)['name']
+                    saved.append(path / name)
+                    caption = entry['caption'].strip()
+                    offset = candidates[entry['after']]['offset']
+                    additions.append((offset, f'\n\n![{caption}]({name})\n\n*{caption}*'))
+                updated = original
+                for offset, text in reversed(additions):
+                    updated = updated[:offset] + text + updated[offset:]
+                write(source, updated)
+                return {'count': count, 'path': export_article(payload)['path']}
+            except (OSError, ValueError, Problem):
+                if source.read_text() != original:
+                    write(source, original)
+                for file in saved:
+                    file.unlink()
+                if saved and previous_record is None:
+                    record.unlink(missing_ok=True)
+                elif saved:
+                    write(record, previous_record)
+                raise
+    finally:
+        with LOCK:
+            GENERATING_IMAGES.discard(identifier)
+
+
+def codex_image(tool, prompt):
+    with tempfile.TemporaryDirectory(prefix='wechat-image-') as scratch:
+        try:
+            result = subprocess.run(
+                [tool, '-a', 'never', '--enable', 'image_generation', '--disable', 'shell_tool',
+                 '-c', 'web_search="disabled"', 'exec', '--skip-git-repo-check', '--ephemeral',
+                 '--sandbox', 'read-only', '--color', 'never', '--json', '-'],
+                input=prompt, cwd=scratch, text=True, capture_output=True, timeout=420)
+        except subprocess.TimeoutExpired:
+            raise Problem('Codex 生图超过 7 分钟，请稍后重试。') from None
+        except OSError:
+            raise Problem('无法启动 Codex，请检查本机 Codex 安装。') from None
+    codex_home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    generated = (codex_home / 'generated_images').resolve()
+    # Codex exec reports a thread ID and saves its images in that thread's directory.
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        thread = event.get('thread_id', '')
+        if event.get('type') != 'thread.started' or not re.fullmatch(r'[0-9a-f-]{36}', thread):
+            continue
+        directory = generated / thread
+        for candidate in sorted(directory.glob('exec-*')):
+            file = candidate.resolve()
+            if (file.parent == directory and file.suffix.lower() in IMAGE_TYPES
+                    and file.is_file() and file.stat().st_size <= 15_000_000):
+                return file.read_bytes(), file.suffix.lower()
+        break
+    raise Problem('Codex 未返回可保存的图片。请检查 Codex 登录、网络和生图额度，或本次图片是否超过 15 MB。')
+
+
 def add_image(payload):
     import base64
     import binascii
 
     path = article_dir(payload['id'])
-    cover_image = payload.get('cover') is True
     filename = Path(str(payload.get('name', ''))).name
-    suffix = Path(filename).suffix.lower()
     try:
         data = base64.b64decode(payload.get('data', ''), validate=True)
     except (ValueError, binascii.Error):
         raise Problem('无法读取图片。')
+    return save_image(path, payload.get('cover') is True, filename, data)
+
+
+def save_image(path, cover_image, filename, data, prompt=''):
+    suffix = Path(filename).suffix.lower()
     formats = [('.png', data.startswith(b'\x89PNG\r\n\x1a\n')),
                ('.jpg', data.startswith(b'\xff\xd8\xff')),
                ('.gif', data.startswith((b'GIF87a', b'GIF89a'))),
@@ -698,8 +921,22 @@ def add_image(payload):
         name = prefix + suffix
         if (target / name).exists():
             name = f'{prefix}-{secrets.token_hex(3)}{suffix}'
-        with (target / name).open('xb') as file:
-            file.write(data)
+        record = target / '素材记录.json'
+        if prompt:
+            records = json.loads(record.read_text()) if record.exists() else []
+            if not isinstance(records, list):
+                raise Problem('图片素材记录格式无效，请先检查 images/素材记录.json。')
+            records.append({'name': name, 'path': 'images/' + name, 'source': 'Codex 内置生图', 'prompt': prompt})
+        saved = target / name
+        with saved.open('xb') as file:
+            try:
+                file.write(data)
+                file.close()
+                if prompt:
+                    write(record, json.dumps(records, ensure_ascii=False, indent=2) + '\n')
+            except OSError:
+                saved.unlink(missing_ok=True)
+                raise
         if cover_image:
             source = path / 'article.md'
             front, body = split_article(source.read_text())
@@ -880,6 +1117,7 @@ POST_ACTIONS = {
     '/api/open': open_article, '/api/save': save_article,
     '/api/status': change_status, '/api/draft': draft, '/api/draft/reset': clear_draft,
     '/api/export': export_article, '/api/image': add_image, '/api/ai': ai_draft,
+    '/api/image/generate': generate_image, '/api/image/auto': auto_illustrate,
     '/api/wechat/check': check_wechat,
     '/api/task': lambda payload: {'text': writing_task(article_dir(payload['id']), payload)},
     '/api/hot': lambda payload: refresh_hot(payload.get('force') is True),
